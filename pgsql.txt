@@ -1,0 +1,9 @@
+MSB-Flashcards-Premium/
+│
+├── index.html
+├── style.css
+├── script.js
+├── media/
+│   └── logo_oficial.png
+└── data/
+    └── banco.json

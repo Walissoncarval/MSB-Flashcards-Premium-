@@ -1,1 +1,303 @@
-bash build_msb.sh
+# salvar como build_msb.sh e executar: bash build_msb.sh /caminho/para/logo.jpg
+# argumento 1: caminho para a sua imagem de logo (ex: ~/Downloads/logo.png)
+
+set -e
+
+OUTDIR="MSB-Flashcards-Premium-Final"
+ZIPFILE="MSB-Flashcards-Premium-Final.zip"
+LOGO_SRC="$1"
+
+if [ -z "$LOGO_SRC" ]; then
+  echo "Uso: bash build_msb.sh /caminho/para/logo.png"
+  exit 1
+fi
+
+rm -rf "$OUTDIR" "$ZIPFILE"
+mkdir -p "$OUTDIR"/{css,js,media,data,premium}
+
+# copy logo (will be named logo_oficial.png)
+cp "$LOGO_SRC" "$OUTDIR/media/logo_oficial.png" || { echo "Falha ao copiar logo"; exit 1; }
+
+# create gold texture (simple gradient) using ImageMagick if available, else fallback copy
+if command -v convert >/dev/null 2>&1; then
+  convert -size 1600x1000 gradient: -fill "rgb(216,184,74)" -colorize 20% -blur 0x1 "$OUTDIR/media/gold_texture.jpg"
+else
+  # fallback: create plain JPEG with dd of zeros (still fine)
+  python3 - <<'PY'
+from PIL import Image, ImageDraw
+img = Image.new('RGB',(1600,1000),(30,28,26))
+d = ImageDraw.Draw(img)
+for y in range(0,1000,4):
+    d.line([(0,y),(1600,y)], fill=(216,184,74))
+img.save("'''$OUTDIR'''/media/gold_texture.jpg","JPEG",quality=85)
+PY
+fi
+
+# data/users.json
+cat > "$OUTDIR/data/users.json" <<'JSON'
+[
+  {"username":"admin","password":"msb123","isAuthorized":true},
+  {"username":"teste","password":"teste","isAuthorized":false}
+]
+JSON
+
+# data/flashcards.json
+cat > "$OUTDIR/data/flashcards.json" <<'JSON'
+[
+  {"front":"O que é fotossíntese?","back":"Processo em que plantas transformam luz solar em energia química (glicose)."},
+  {"front":"Qual é a função dos lisossomos nas células?","back":"Responsáveis pela digestão intracelular de substâncias."},
+  {"front":"Qual a unidade básica da vida?","back":"A célula."}
+]
+JSON
+
+# css/style.css
+cat > "$OUTDIR/css/style.css" <<'CSS'
+/* premium style */
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Cormorant+Garamond:wght@300;400;600&display=swap');
+:root{--gold:#d8b84a;--gold-dark:#b1892b;--bg:#000;}
+body{margin:0;font-family:'Cormorant Garamond', serif;background:#000;color:#eee;}
+header{display:flex;align-items:center;gap:12px;padding:12px 20px;background:linear-gradient(90deg,rgba(0,0,0,0.9),rgba(8,8,8,0.95));}
+header img{height:56px;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,0.6);}
+header h1{color:var(--gold);margin:0;font-family:'Cinzel',serif;font-size:1.4rem;}
+nav{margin-left:auto;}
+nav a{color:#ddd;text-decoration:none;padding:8px 12px;border-radius:8px;}
+.container{max-width:1100px;margin:28px auto;padding:0 16px;}
+.premium-area{padding:28px;border-radius:12px;background-image: url('media/gold_texture.jpg'), linear-gradient(180deg, rgba(0,0,0,0.6), rgba(4,4,4,0.8)); border:1px solid rgba(216,184,74,0.08);}
+.premium-header{display:flex;flex-direction:column;align-items:center;gap:8px;text-align:center;}
+.premium-header h2{color:var(--gold);margin:0;font-family:'Cinzel',serif;}
+.controls{display:flex;gap:12px;justify-content:center;margin-top:12px;flex-wrap:wrap;}
+.btn{padding:12px 18px;border-radius:10px;border:none;cursor:pointer;font-weight:700;}
+.btn-gold{background:linear-gradient(90deg,var(--gold),var(--gold-dark));color:#000;box-shadow:0 8px 30px rgba(181,141,41,0.12);position:relative;overflow:hidden;}
+.btn-gold::after{content:'';position:absolute;left:-50%;top:0;width:50%;height:100%;background:linear-gradient(90deg,rgba(255,255,255,0.4),rgba(255,255,255,0.05));transform:skewX(-20deg);transition:all .8s;}
+.btn-gold:hover::after{left:150%;}
+.info-box{background:rgba(255,255,255,0.02);padding:12px;border-radius:8px;color:#ccc;margin-top:10px;}
+.citation{margin-top:16px;text-align:center;color:#f3e9c2;font-style:italic;}
+.footer{margin-top:28px;padding:18px;text-align:center;color:#aaa;font-size:0.95rem;border-top:1px solid rgba(255,255,255,0.02);}
+CSS
+
+# js/script.js
+cat > "$OUTDIR/js/script.js" <<'JS'
+// script.js - handles login, authorization and simulated export message
+async function loadFlashcards(){
+  try{
+    const res = await fetch('data/flashcards.json');
+    const cards = await res.json();
+    return cards;
+  }catch(e){ return []; }
+}
+function showMessage(text){
+  const el = document.createElement('div');
+  el.style.position='fixed'; el.style.right='20px'; el.style.bottom='20px';
+  el.style.background='rgba(0,0,0,0.8)'; el.style.color='#fff'; el.style.padding='12px 16px';
+  el.style.borderRadius='8px'; el.style.boxShadow='0 8px 30px rgba(0,0,0,0.6)';
+  el.innerText = text;
+  document.body.appendChild(el);
+  setTimeout(()=>el.remove(),3500);
+}
+document.addEventListener('DOMContentLoaded', async function(){
+  const loginForm = document.getElementById('login-form');
+  const logoutBtn = document.getElementById('logout-btn');
+  const premiumSection = document.getElementById('premium-area');
+  const exportBtn = document.getElementById('export-btn');
+  const importBtn = document.getElementById('import-btn');
+  const status = document.getElementById('status-text');
+  let currentUser = null;
+  let users = [];
+  try{
+    const r = await fetch('data/users.json');
+    users = await r.json();
+  }catch(e){ users = []; }
+  function renderLoggedIn(user){
+    document.getElementById('user-name').innerText = user.username;
+    loginForm.style.display='none';
+    logoutBtn.style.display='inline-block';
+    if(user.isAuthorized){
+      premiumSection.style.display='block';
+      status.innerText = 'Acesso autorizado — você pode usar a Área Premium.';
+      exportBtn.style.display='inline-block';
+      importBtn.style.display='inline-block';
+    } else {
+      premiumSection.style.display='none';
+      status.innerText = '🔐 Acesso restrito. Adquira o produto para liberar.';
+      exportBtn.style.display='none';
+      importBtn.style.display='none';
+    }
+  }
+  loginForm.addEventListener('submit', function(e){
+    e.preventDefault();
+    const u = document.getElementById('username').value;
+    const p = document.getElementById('password').value;
+    const found = users.find(x=>x.username===u && x.password===p);
+    if(found){
+      currentUser = found;
+      localStorage.setItem('msb_user', JSON.stringify({username:found.username}));
+      renderLoggedIn(found);
+      showMessage('Login efetuado: ' + found.username);
+    } else {
+      showMessage('Usuário ou senha inválidos.');
+    }
+  });
+  logoutBtn.addEventListener('click', function(){
+    localStorage.removeItem('msb_user');
+    location.reload();
+  });
+  document.getElementById('admin-unlock').addEventListener('click', function(){
+    const user = users.find(x=>x.username==='admin');
+    if(user){ user.isAuthorized = true; localStorage.setItem('msb_admin_unlocked','1'); showMessage('Acesso liberado (admin). Recarregue a página.'); }
+  });
+  exportBtn.addEventListener('click', function(){
+    exportBtn.disabled = true;
+    exportBtn.innerText = 'Gerando...';
+    setTimeout(function(){
+      exportBtn.disabled = false;
+      exportBtn.innerText = 'Exportar Baralho (.apkg)';
+      showMessage('✨ Sucesso! Seus flashcards foram preparados para exportação.');
+    }, 1500);
+  });
+  importBtn.addEventListener('click', function(){
+    showMessage('📥 Instrução: Baixe o arquivo .apkg e importe no Anki via Arquivo > Importar.');
+  });
+  const stored = localStorage.getItem('msb_user');
+  if(stored){
+    const obj = JSON.parse(stored);
+    const found = users.find(x=>x.username===obj.username);
+    if(found) renderLoggedIn(found);
+  }
+});
+JS
+
+# index.html
+cat > "$OUTDIR/index.html" <<'HTML'
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MSB Flashcards Premium</title>
+<link rel="icon" type="image/png" href="media/logo_oficial.png">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header>
+  <img src="media/logo_oficial.png" alt="MSB Logo">
+  <h1>MSB Flashcards Premium</h1>
+  <nav>
+    <a href="index.html">Início</a>
+    <a href="#premium-area">Área Premium</a>
+  </nav>
+</header>
+
+<div class="container">
+  <section>
+    <h2>Bem-vindo ao MSB Flashcards</h2>
+    <p>Plataforma de estudos com exportação para Anki (simulada).</p>
+  </section>
+
+  <section style="margin-top:18px;">
+    <div style="display:flex;gap:18px;align-items:center;">
+      <form id="login-form" style="display:flex;gap:8px;align-items:center;">
+        <input id="username" placeholder="Usuário" required>
+        <input id="password" type="password" placeholder="Senha" required>
+        <button type="submit" class="btn btn-gold">Entrar</button>
+      </form>
+      <div style="margin-left:auto; display:flex;gap:8px;align-items:center;">
+        <span id="user-name" style="color:#ccc;"></span>
+        <button id="logout-btn" style="display:none;" class="btn btn-ghost">Sair</button>
+      </div>
+    </div>
+    <div style="margin-top:12px;">
+      <button id="admin-unlock" class="btn btn-ghost">🔑 Liberar acesso (admin)</button>
+    </div>
+    <div id="status-text" class="info-box" style="margin-top:12px;">Faça login para acessar a Área Premium.</div>
+  </section>
+
+  <section id="premium-area" class="premium-area" style="display:none;">
+    <div class="premium-header">
+      <img src="media/logo_oficial.png" alt="MSB" style="height:88px;border-radius:12px;box-shadow:0 8px 20px rgba(0,0,0,0.6);">
+      <h2>Área Premium</h2>
+      <p class="lead">Acesso exclusivo — exporte seus baralhos no formato Anki (.apkg).</p>
+    </div>
+
+    <div class="controls">
+      <button id="export-btn" class="btn btn-gold" style="display:none;">💾 Exportar Baralho (.apkg)</button>
+      <button id="import-btn" class="btn btn-gold" style="display:none;">📥 Importar no Anki</button>
+    </div>
+
+    <div class="info-box" style="text-align:center;margin-top:12px;">
+      <strong>Instruções:</strong>
+      <ol style="text-align:left;max-width:720px;margin:8px auto;">
+        <li>Baixe o arquivo .apkg (simulado) e importe no Anki via Arquivo &gt; Importar.</li>
+        <li>Se o baralho contiver mídia, inclua os arquivos correspondentes.</li>
+      </ol>
+    </div>
+
+    <div class="citation">
+      🔐 <strong>“ora et labora et legere”</strong><br>
+      ✨ <em>“Reze, trabalhe e estude.”</em><br>
+      <small>— São Bento de Núrsia (480–547)</small>
+    </div>
+  </section>
+
+  <footer class="footer">
+    MSB Flashcards Premium © 2025
+  </footer>
+</div>
+
+<script src="js/script.js"></script>
+</body>
+</html>
+HTML
+
+# premium/index.html (simple copy)
+cat > "$OUTDIR/premium/index.html" <<'HTML'
+<!doctype html>
+<html lang="pt-BR">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Área Premium - MSB</title>
+<link rel="stylesheet" href="../css/style.css"></head><body>
+<header style="display:flex;align-items:center;gap:12px;padding:12px 20px;background:linear-gradient(90deg,rgba(0,0,0,0.9),rgba(8,8,8,0.95));">
+  <img src="../media/logo_oficial.png" alt="MSB" style="height:56px;">
+  <h1 style="color:#d8b84a;margin:0;font-family:'Cinzel',serif;">MSB Flashcards Premium</h1>
+</header>
+<div class="container">
+  <div class="premium-area">
+    <div class="premium-header">
+      <img src="../media/logo_oficial.png" alt="MSB" style="height:88px;">
+      <h2>Área Premium</h2>
+      <p class="lead">Conteúdo exclusivo para membros autorizados.</p>
+    </div>
+    <div class="controls">
+      <button class="btn btn-gold">💾 Exportar Baralho (.apkg)</button>
+      <button class="btn btn-gold">📥 Importar no Anki</button>
+    </div>
+    <div class="citation">🔐 <strong>“ora et labora et legere”</strong><br>✨ <em>“Reze, trabalhe e estude.”</em></div>
+  </div>
+  <footer class="footer">MSB Flashcards Premium © 2025</footer>
+</div>
+</body></html>
+HTML
+
+# README.md
+cat > "$OUTDIR/README.md" <<'MD'
+# MSB Flashcards Premium © 2025
+
+Este pacote é uma versão final pronta para publicação no GitHub Pages.
+
+## Estrutura do projeto
+- `index.html` - Página principal com login e Área Premium.
+- `css/style.css` - Estilos e tema dourado/metálico.
+- `js/script.js` - Lógica de login e simulação de exportação .apkg.
+- `media/logo_oficial.png` - Logo oficial do projeto.
+- `media/gold_texture.jpg` - Textura metálica de fundo.
+- `data/users.json` - Banco JSON simulado para controle de acesso.
+- `data/flashcards.json` - Flashcards de exemplo.
+
+## Publicação no GitHub Pages
+1. Crie um repositório no GitHub com o nome desejado.
+2. Faça commit e envie os arquivos deste diretório para a branch `main`.
+3. No GitHub, vá em **Settings > Pages** e selecione a branch `main` com pasta `/ (root)`.
+4. Salve; o site ficará disponível em `https://<seu-usuario>.github.io/<nome-do-repositorio>/`.
+
+## Testando localmente
+- Abra `index.html` via um servidor estático (recomendado):
+  ```bash
+  npx serve .
